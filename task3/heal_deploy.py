@@ -9,9 +9,11 @@ import mujoco
 import mujoco.viewer
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
+SCRIPT_DIR = Path(__file__).resolve().parent
+PROJECT_DIR = SCRIPT_DIR.parent
+sys.path.insert(0, str(PROJECT_DIR))
 
-from heal_fk import heal_fk
+from task2.heal_fk import heal_fk
 
 XML_PATH = ROOT / "robot_descriptions/single_arm_heal_effort_actuation_rs_mj.xml"
 
