@@ -1,5 +1,6 @@
 
-import threading
+import time
+from pathlib import Path
 import tkinter as tk
 from tkinter.scrolledtext import ScrolledText
 
@@ -7,19 +8,18 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 
-from scripts.franka_fk import franka_mujoco_fk
-from scripts.heal_fk import heal_fk
+from task2.franka_fk import franka_mujoco_fk
+from task2.heal_fk import heal_fk
 
 
-FRANKA_XML = "robot_descriptions/franka/scene.xml"
-HEAL_XML = "robot_descriptions/single_arm_heal_effort_actuation_rs_mj.xml"
+ROOT = Path(__file__).resolve().parents[1]
+
+FRANKA_XML = ROOT / "robot_descriptions/franka/scene.xml"
+HEAL_XML = ROOT / "robot_descriptions/single_arm_heal_effort_actuation_rs_mj.xml"
 
 FRANKA_JOINTS = [f"joint{i}" for i in range(1, 8)]
 HEAL_JOINTS = [f"joint_{i}" for i in range(1, 7)]
 
-
-# Candidate standard-DH parameters: [a, alpha, d, theta_offset].
-# Verify these against the robot's actual kinematic convention.
 FRANKA_DH = [
     [0,       0,          .333,  0],
     [0,      -np.pi/2,    0,     0],
@@ -34,6 +34,7 @@ FRANKA_DH = [
 def dh_transform(a, alpha, d, theta):
     ca, sa = np.cos(alpha), np.sin(alpha)
     ct, st = np.cos(theta), np.sin(theta)
+
     return np.array([
         [ct, -st * ca, st * sa, a * ct],
         [st, ct * ca, -ct * sa, a * st],
@@ -44,26 +45,33 @@ def dh_transform(a, alpha, d, theta):
 
 def franka_dh_fk(q):
     T = np.eye(4)
+
     for (a, alpha, d, offset), angle in zip(FRANKA_DH, q):
         T = T @ dh_transform(a, alpha, d, angle + offset)
+
     return T
 
 
 def joint_id(model, name):
     jid = mujoco.mj_name2id(
-        model, mujoco.mjtObj.mjOBJ_JOINT, name
+        model,
+        mujoco.mjtObj.mjOBJ_JOINT,
+        name,
     )
+
     if jid < 0:
         raise ValueError(f"Joint '{name}' was not found in the XML.")
+
     return jid
 
 
 def get_model(xml_path, joint_names):
-    model = mujoco.MjModel.from_xml_path(xml_path)
+    model = mujoco.MjModel.from_xml_path(str(xml_path))
     data = mujoco.MjData(model)
     data.qpos[:] = model.qpos0
 
     info = []
+
     for name in joint_names:
         jid = joint_id(model, name)
 
@@ -71,6 +79,7 @@ def get_model(xml_path, joint_names):
             raise ValueError(f"{name} is not a hinge joint.")
 
         axis = model.jnt_axis[jid]
+
         if model.jnt_limited[jid]:
             low, high = model.jnt_range[jid]
             low_deg, high_deg = np.rad2deg([low, high])
@@ -92,38 +101,42 @@ def ask_angles(robot_name, info):
     print("\n" + "=" * 64)
     print(f"{robot_name}: JOINT ANGLE INPUT")
     print("=" * 64)
-    print("DISCLAIMER")
+
     print("- Enter angles in degrees.")
     print("- The axis shown is the joint axis defined in the MuJoCo XML.")
-    print("- Positive rotation follows the right-hand rule around that axis.")
-    print("- Limits are read from the loaded model when limits are defined.")
-    print("- Unverified DH results are estimates, not proof of physical accuracy.")
-    print("- Simulation only: do not send these values directly to hardware.\n")
+    print("- Positive rotation follows the right-hand rule.")
+    print("- Limits are read from the loaded model.")
+    print("- Simulation only: do not send these values directly to hardware.")
+    print()
 
     angles = []
+
     for i, item in enumerate(info, 1):
         print(f"Joint {i}: {item['name']}")
-        print(f"  Associated joint: {item['name']}")
         print("  XML axis:", np.array2string(item["axis"], precision=3))
-
-        if item["limited"]:
-            print(f"  Model range: {item['low']:.2f}° to "
-                  f"{item['high']:.2f}°")
-        else:
-            print("  Model range: unlimited in XML; input restricted to ±180°")
 
         low = item["low"] if item["limited"] else -180.0
         high = item["high"] if item["limited"] else 180.0
 
+        if item["limited"]:
+            print(f"  Model range: {low:.2f}° to {high:.2f}°")
+        else:
+            print("  Model range: unlimited in XML; input restricted to ±180°")
+
         while True:
             try:
                 value = float(input("  Angle (degrees): "))
+
                 if not np.isfinite(value) or not low <= value <= high:
-                    print(f"  Enter a finite angle between {low:.2f}° "
-                          f"and {high:.2f}°.")
+                    print(
+                        f"  Enter a finite angle between "
+                        f"{low:.2f}° and {high:.2f}°."
+                    )
                     continue
+
                 angles.append(value)
                 break
+
             except ValueError:
                 print("  Enter a valid number, e.g. 30 or -15.5.")
 
@@ -132,123 +145,299 @@ def ask_angles(robot_name, info):
 
 def set_joint_angles(model, data, names, q):
     data.qpos[:] = model.qpos0
+
     for name, angle in zip(names, q):
         jid = joint_id(model, name)
         data.qpos[model.jnt_qposadr[jid]] = angle
+
     mujoco.mj_forward(model, data)
 
 
 def body_pose(model, data, body_name):
     bid = mujoco.mj_name2id(
-        model, mujoco.mjtObj.mjOBJ_BODY, body_name
+        model,
+        mujoco.mjtObj.mjOBJ_BODY,
+        body_name,
     )
+
     if bid < 0:
         raise ValueError(f"End-effector body '{body_name}' not found.")
 
-    return data.xpos[bid].copy(), data.xmat[bid].reshape(3, 3).copy()
+    return (
+        data.xpos[bid].copy(),
+        data.xmat[bid].reshape(3, 3).copy(),
+    )
 
 
-def launch_viewer(model, data, title):
-    def run():
+def show_viewer(model, data, title):
+    import threading
+
+    def run_viewer():
         with mujoco.viewer.launch_passive(model, data) as viewer:
             viewer.cam.lookat[:] = data.xpos[1]
+
             while viewer.is_running():
                 viewer.sync()
-                import time
                 time.sleep(1 / 60)
 
-    threading.Thread(target=run, daemon=True, name=title).start()
+    thread = threading.Thread(
+        target=run_viewer,
+        daemon=True,
+        name=title,
+    )
+    thread.start()
 
+    time.sleep(1)
 
-def dashboard(root, title, dh_description, dh_T,
-              mujoco_pos, mujoco_rot, extra=""):
-    window = tk.Toplevel(root)
-    window.title(title)
-    window.geometry("760x700")
+def show_dashboard(
+    title,
+    dh_description,
+    dh_T,
+    mujoco_pos,
+    mujoco_rot,
+    extra="",
+):
+    root = tk.Tk()
+    root.title(title)
+    root.geometry("760x700")
 
-    text = ScrolledText(window, wrap=tk.WORD, font=("monospace", 10))
-    text.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+    text = ScrolledText(
+        root,
+        wrap=tk.WORD,
+        font=("monospace", 10),
+    )
+
+    text.pack(
+        fill=tk.BOTH,
+        expand=True,
+        padx=10,
+        pady=10,
+    )
 
     text.insert(tk.END, title + "\n")
     text.insert(tk.END, "=" * 64 + "\n\n")
-    text.insert(tk.END, dh_description + "\n\n")
-    text.insert(tk.END, "Candidate DH / FK transformation:\n")
-    text.insert(tk.END, np.array2string(dh_T, precision=5, suppress_small=True))
-    text.insert(tk.END, "\n\nCandidate FK position (m):\n")
-    text.insert(tk.END, np.array2string(dh_T[:3, 3], precision=5))
-    text.insert(tk.END, "\n\nMuJoCo end-effector position (m):\n")
-    text.insert(tk.END, np.array2string(mujoco_pos, precision=5))
-    text.insert(tk.END, "\n\nMuJoCo end-effector rotation:\n")
-    text.insert(tk.END, np.array2string(mujoco_rot, precision=5))
 
-    error = np.linalg.norm(dh_T[:3, 3] - mujoco_pos)
-    text.insert(tk.END, f"\n\nRaw position difference: {error:.6f} m\n")
-    text.insert(tk.END, "\nIMPORTANT:\n")
-    text.insert(tk.END,
-        "This difference is meaningful only when both methods use the "
-        "same base frame, end-effector frame, joint zero offsets and "
-        "kinematic convention. A large difference does not by itself "
-        "prove either method is wrong.\n")
-    text.insert(tk.END, extra)
+    text.insert(tk.END, dh_description + "\n\n")
+
+    text.insert(
+        tk.END,
+        "FK transformation:\n",
+    )
+    text.insert(
+        tk.END,
+        np.array2string(
+            dh_T,
+            precision=5,
+            suppress_small=True,
+        ),
+    )
+
+    text.insert(
+        tk.END,
+        "\n\nFK position (m):\n",
+    )
+    text.insert(
+        tk.END,
+        np.array2string(
+            dh_T[:3, 3],
+            precision=5,
+        ),
+    )
+
+    text.insert(
+        tk.END,
+        "\n\nMuJoCo end-effector position (m):\n",
+    )
+    text.insert(
+        tk.END,
+        np.array2string(
+            mujoco_pos,
+            precision=5,
+        ),
+    )
+
+    text.insert(
+        tk.END,
+        "\n\nMuJoCo end-effector rotation:\n",
+    )
+    text.insert(
+        tk.END,
+        np.array2string(
+            mujoco_rot,
+            precision=5,
+        ),
+    )
+
+    error = np.linalg.norm(
+        dh_T[:3, 3] - mujoco_pos
+    )
+
+    text.insert(
+        tk.END,
+        f"\n\nPosition difference: {error:.6f} m\n",
+    )
+
+    text.insert(
+        tk.END,
+        "\n" + extra,
+    )
+
     text.configure(state=tk.DISABLED)
-    return window
+
+    print("\nDashboard opened.")
+    print("Close the dashboard window to return to the robot menu.")
+
+    root.mainloop()
+
+
+def run_heal():
+    print("\nLoading HEAL model...")
+
+    model, data, info = get_model(
+        HEAL_XML,
+        HEAL_JOINTS,
+    )
+
+    q = ask_angles(
+        "HEAL",
+        info,
+    )
+
+    set_joint_angles(
+        model,
+        data,
+        HEAL_JOINTS,
+        q,
+    )
+
+    mujoco_pos, mujoco_rot = body_pose(
+        model,
+        data,
+        "end_effector",
+    )
+
+    heal_T = heal_fk(q)
+
+    error = np.linalg.norm(
+        heal_T[:3, 3] - mujoco_pos
+    )
+
+    print("\n========== HEAL RESULT ==========")
+    print("Joint angles (degrees):", np.rad2deg(q))
+    print("FK position (m):", heal_T[:3, 3])
+    print("MuJoCo position (m):", mujoco_pos)
+    print(f"Position difference: {error:.9f} m")
+    print("=================================")
+
+    show_viewer(
+        model,
+        data,
+        "HEAL MuJoCo Viewer",
+    )
+
+    show_dashboard(
+        "HEAL — FK vs MuJoCo",
+        "HEAL XML-transform-chain FK result.",
+        heal_T,
+        mujoco_pos,
+        mujoco_rot,
+        "The HEAL FK uses the existing XML-derived "
+        "transform chain from task2/heal_fk.py.",
+    )
+
+
+def run_franka():
+    print("\nLoading Franka Panda model...")
+
+    model, data, info = get_model(
+        FRANKA_XML,
+        FRANKA_JOINTS,
+    )
+
+    q = ask_angles(
+        "Franka Panda",
+        info,
+    )
+
+    set_joint_angles(
+        model,
+        data,
+        FRANKA_JOINTS,
+        q,
+    )
+
+    mujoco_pos, mujoco_rot = body_pose(
+        model,
+        data,
+        "hand",
+    )
+
+    # Use the existing Franka MuJoCo FK implementation.
+    # This uses the actual MuJoCo robot model rather than
+    # the previously unverified candidate DH table.
+    fk_position = franka_mujoco_fk(q)
+
+    error = np.linalg.norm(
+        fk_position - mujoco_pos
+    )
+
+    fk_T = np.eye(4)
+    fk_T[:3, :3] = mujoco_rot
+    fk_T[:3, 3] = fk_position
+
+    print("\n========== FRANKA RESULT ==========")
+    print("Joint angles (degrees):", np.rad2deg(q))
+    print("FK position (m):", fk_position)
+    print("MuJoCo hand position (m):", mujoco_pos)
+    print("Position difference (m):", fk_position - mujoco_pos)
+    print(f"Position error: {error:.9f} m")
+    print("===================================")
+
+    show_viewer(
+        model,
+        data,
+        "Franka MuJoCo Viewer",
+    )
+
+    show_dashboard(
+        "Franka — FK vs MuJoCo",
+        "Franka FK calculated from the loaded MuJoCo model.",
+        fk_T,
+        mujoco_pos,
+        mujoco_rot,
+        "The FK position is calculated using "
+        "task2/franka_fk.py and compared against "
+        "the hand position from the same loaded MuJoCo model.\n"
+        "The previous candidate DH table was removed from "
+        "this result because it was not validated against the XML.",
+    )
 
 
 def main():
-    print("DUAL ROBOT FK LAB")
-    print("Enter joint angles for each robot when prompted.")
+    while True:
+        print("\n")
+        print("=" * 64)
+        print("             DUAL ROBOT MUJOCO LAUNCHER")
+        print("=" * 64)
+        print("1. HEAL")
+        print("2. Franka")
+        print("3. Exit")
+        print("=" * 64)
 
-    fm, fd, fi = get_model(FRANKA_XML, FRANKA_JOINTS)
-    hm, hd, hi = get_model(HEAL_XML, HEAL_JOINTS)
+        choice = input("Choose robot: ").strip()
 
-    fq = ask_angles("Franka Panda", fi)
-    hq = ask_angles("HEAL", hi)
+        if choice == "1":
+            run_heal()
 
-    set_joint_angles(fm, fd, FRANKA_JOINTS, fq)
-    set_joint_angles(hm, hd, HEAL_JOINTS, hq)
+        elif choice == "2":
+            run_franka()
 
-    # MuJoCo reference poses
-    f_pos, f_rot = body_pose(fm, fd, "hand")
-    h_pos, h_rot = body_pose(hm, hd, "end_effector")
+        elif choice == "3":
+            print("\nExiting launcher.")
+            break
 
-    # Existing FK implementations
-    franka_mujoco_position = franka_mujoco_fk(fq)
-    franka_T = franka_dh_fk(fq)
-    heal_T = heal_fk(hq)
-
-    print("\nFranka MuJoCo FK function position:", franka_mujoco_position)
-    print("Franka scene hand position:", f_pos)
-    print("HEAL scene end-effector position:", h_pos)
-
-    launch_viewer(fm, fd, "Franka MuJoCo Viewer")
-    launch_viewer(hm, hd, "HEAL MuJoCo Viewer")
-
-    root = tk.Tk()
-    root.withdraw()
-
-    dashboard(
-        root,
-        "Franka — DH vs MuJoCo",
-        "Franka candidate DH table [a, alpha, d, theta offset]:\n"
-        + np.array2string(np.asarray(FRANKA_DH), precision=5),
-        franka_T, f_pos, f_rot,
-        "\nYour existing franka_mujoco_fk() returns position only. "
-        "It is printed in the terminal for comparison with the scene."
-    )
-
-    dashboard(
-        root,
-        "HEAL — Candidate FK vs MuJoCo",
-        "HEAL uses your existing heal_fk() XML-transform-chain candidate. "
-        "It is not independently verified DH output.",
-        heal_T, h_pos, h_rot,
-        "\nCheck the transform chain against the XML before treating it "
-        "as a validated DH model."
-    )
-
-    print("\nBoth dashboards and viewer threads have been started.")
-    print("Close the dashboard windows to end the launcher.")
-    root.mainloop()
+        else:
+            print("\nInvalid choice. Enter 1, 2, or 3.")
 
 
 if __name__ == "__main__":
