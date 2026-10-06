@@ -12,10 +12,9 @@ import numpy as np
 # Allow importing franka_fk.py from the scripts folder
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SCRIPT_DIR.parent
-sys.path.insert(0, str(SCRIPT_DIR))
+sys.path.insert(0, str(PROJECT_DIR))
 
-from franka_fk import franka_mujoco_fk
-
+from task2.franka_fk import franka_mujoco_fk
 
 XML_PATH = PROJECT_DIR / "robot_descriptions/franka/scene.xml"
 
