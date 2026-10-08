@@ -638,7 +638,25 @@ The application allows:
 - Result visualization
 
 ---
+## 🎥 Lab 2 Demonstration Videos
 
+All Lab 2 demonstration videos are available in the following Google Drive folder:
+
+[Watch Lab 2 Demonstration Videos](https://drive.google.com/drive/folders/1CIvtz5rspxNjfDOI7hQLfJB23owUt10u?usp=drive_link)
+
+The folder contains:
+
+- **Task 2 — Forward Kinematics**
+  - HEAL FK calculation and MuJoCo validation
+  - Franka FK demonstration
+
+- **Task 3 — HEAL Deployment**
+  - HEAL robot deployed in MuJoCo
+  - Joint-angle input and end-effector visualization
+
+- **Task 3 — Franka Deployment**
+  - Franka Panda deployed in MuJoCo
+  - Joint-angle input and end-effector visualization
 # Conclusion
 
 This laboratory demonstrated the complete workflow for implementing and validating forward kinematics for robotic manipulators.
